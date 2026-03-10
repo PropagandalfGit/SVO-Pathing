@@ -66,7 +66,7 @@ local Gizmo = require("../ModuleUtils/_gizmo")
 
 --overlap params for use in the rasterization stage
 local OverParams = OverlapParams.new()
-OverParams.FilterDescendantsInstances = {workspace.Guardian}
+OverParams.FilterDescendantsInstances = { workspace.Agent }
 
 --internal typedefs for readability
 --wrapper for what a link number is specifically
@@ -410,7 +410,7 @@ function SVOMethods.RasterizeLeaves(self: SVOClass, mortonList: { number }, part
 		cursor += count
 	end
 
-	local chunkSize = math.max(1, #allChildMortons // 8)
+	local chunkSize = math.max(1, #allChildMortons // 4)
 	local totalDone, totalChunks = 0, 0
 	for i = 1, #allChildMortons, chunkSize do
 		local sliceStart = i
@@ -476,7 +476,10 @@ function SVOMethods.ComputeAllFaceOpen(self: SVOClass, node: Node, layer: number
 			local firstChild = SVO.FirstChildCode(SVO.GetMortonCode(node.NodeLink))
 			for _, childIdx in faces do
 				local childNode = self:GrabNode(layer - 1, firstChild + childIdx)
-				if childNode and childNode.FaceOpen[dirIdx] then
+				if not childNode then
+					faceOpen = true
+					break
+				elseif childNode.FaceOpen[dirIdx] then
 					faceOpen = true
 					break
 				end
@@ -623,6 +626,7 @@ function SVOMethods.HasNodeConnectedPath(
 end 
 
 function SVOMethods.ComputeTraversability(self: SVOClass, partialBuff: { { number } }): ()
+	local cache: { [Node]: {[number]: boolean }} = {}
 	for layer = 0, self.MaxLayer do
 		-- Pass 1: FaceOpen for all nodes at this layer
 		for _, morton in partialBuff[layer] do
@@ -635,6 +639,7 @@ function SVOMethods.ComputeTraversability(self: SVOClass, partialBuff: { { numbe
 		for _, morton in partialBuff[layer] do
 			MaybeYield()
 			local node = self:GrabNode(layer, morton)
+			cache[node] = {}
 
 			for posIdx = 1, #SVO.DIRECTIONS, 2 do
 				local result = if layer == 0
@@ -643,26 +648,6 @@ function SVOMethods.ComputeTraversability(self: SVOClass, partialBuff: { { numbe
 
 				node.Traversable[posIdx]   = result
 				node.Traversable[posIdx+1] = result --negative idx
-
-				for offset = 0, 1 do
-					local dirIdx = posIdx + offset
-					local neighborLink = node.NeighborLinks[dirIdx]
-					if neighborLink and neighborLink >= 0 then
-						local neighborLink = node.NeighborLinks[posIdx]
-						if neighborLink and neighborLink >= 0 then
-							local nLayer = SVO.GetLayerIndex(neighborLink)
-							local nMorton = SVO.GetMortonCode(neighborLink)
-							local neighborNode = self:GrabNode(nLayer, nMorton)
-							
-							-- Only mirror if neighbor is at same layer and already has FaceOpen computed
-							if neighborNode and nLayer == layer then
-								local oppIdx = OppDirIdx(posIdx)
-								neighborNode.Traversable[oppIdx]   = result
-								neighborNode.Traversable[oppIdx+1] = result
-							end
-						end
-					end
-				end
 			end
 		end
 	end
@@ -1139,6 +1124,7 @@ function SVO.DisplayTree(self: SVOClass): ()
 	local box = Instance.new("SelectionBox")
 	box.Adornee = mainPart
 	box.Color3 = Color3.new(0, 0.333333, 1)
+	box.Parent = mainPart
 	
 	for i, v in self.LayerList do
 		for _, c: Node in v do
@@ -1151,11 +1137,17 @@ function SVO.DisplayTree(self: SVOClass): ()
 				part.CastShadow = false
 				part.Size = Vector3.one * (shift * self.VoxelSize) --[[ * 2 / bit32.lshift(1, self.MaxLayer)]]
 				part.Position = self:GrabWorldSpace(SVO.GetMortonCode(c.NodeLink), i)
-				part.Color = Color3.fromHSV(1 - shift / bit32.lshift(1, self.MaxLayer), 0.8, shift / bit32.lshift(1, self.MaxLayer) + 0.3)
+
+				local t = i / math.max(self.MaxLayer, 1)
+				local hue = (t * 0.75 + 0.55) % 1 
+				local sat = 0.5
+				local val = 0.5
+
+				part.Color = Color3.fromHSV(hue, sat, val)
 				part.CanCollide = false
 				part.CanTouch = false
 				part.CanQuery = false
-				part.Transparency = 0.99
+				part.Transparency = 0.99 * ((i / math.max(self.MaxLayer, 1)) ^ 0.05)
 				part.Material = Enum.Material.Neon
 				part.Name = `{tostring(SVO.GetLayerIndex(c.NodeLink))}, {tostring(SVO.GetMortonCode(c.NodeLink))}`
 				part.Parent = model

@@ -46,7 +46,7 @@ local Diag = require("@self/_diagnostics")
 local DIRECTIONS = SVO.DIRECTIONS
 
 local RAY_PARAMS = RaycastParams.new()
-RAY_PARAMS.FilterDescendantsInstances = {workspace.Guardian}
+RAY_PARAMS.FilterDescendantsInstances = { workspace.Agent }
 
 type Pair<T, R> = {
 	P1: T,
@@ -82,7 +82,7 @@ local function MaybeYield()
 	end
 end
 
-local function VisualizeNode(pos: Vector3, layer: number, color: Color3, svo: SVO.SVOClass, optTime: number?)
+local function VisualizeNode(pos: Vector3, layer: number, color: Color3, svo: SVO.SVOClass, optTime: number?, optSubnode: number?)
 	debug.profilebegin("Visualizing Node")
 	Gizmo.AddDebrisInSeconds(optTime or 0.1, function() 
 		Gizmo.PushProperty("Color3", color)
@@ -91,7 +91,7 @@ local function VisualizeNode(pos: Vector3, layer: number, color: Color3, svo: SV
 
 		Gizmo.Box:Draw(
 			CFrame.new(pos),
-			Vector3.one * (bit32.lshift(1, layer) * svo.VoxelSize),
+			Vector3.one * (bit32.lshift(1, layer) * svo.VoxelSize) / if optSubnode then 4 else 1,
 			false
 		)
 	end)
@@ -104,6 +104,17 @@ local function ConstrainVector(vec: Vector3, scale: number): Vector3
 	vec *= scale
 	
 	return vec
+end
+
+local function VisualizePath(path: { Vector3 }, color: Color3? | (number, number) -> Color3, timePeriod: number?)
+	for i = 1, #path - 1 do
+		Gizmo.AddDebrisInSeconds(timePeriod or 0.1, function()
+			local usedColor = if not color then Color3.fromRGB(0, 255, 0) 
+				else (if typeof(color) == "Color3" then color else color(i, #path))
+			Gizmo.PushProperty("Color3", usedColor)
+			Gizmo.Arrow:Draw(path[i], path[i+1], 1, (path[i+1] - path[i]).Magnitude, 5)
+		end)
+	end
 end
 
 local function ReverseMap(list: {[Vector3]: Vector3}, goal: Vector3): {Vector3}
@@ -139,6 +150,26 @@ local function PruneCollinear(path: { Vector3 }, tolerance: number): { Vector3 }
 	return pruned
 end
 
+function Pathfinder.StringPull(self: PathfinderClass, path: {Vector3}): {Vector3}
+	if #path <= 2 then 
+		return path 
+	end
+
+	local pruned = { path[1] }
+
+	local p = 1 
+	for i = 2, #path - 1 do
+		local svo = self:FindSVO(path[i])
+		if not svo:LineOfSight(path[p], path[i + 1]) then
+			table.insert(pruned, path[i])
+			p = i
+		end
+	end
+
+	table.insert(pruned, path[#path])
+	return pruned
+end
+
 local function PathToCurved(path: { Vector3 }): { Vector3 }
 	if #path <= 2 then
 		return path
@@ -154,51 +185,20 @@ local function PathToCurved(path: { Vector3 }): { Vector3 }
 	return newPath
 end
 
-function Pathfinder.CompletePath(self: PathfinderClass, list: {[Vector3]: Vector3}, goal: Vector3)
-	local path = {} :: {Vector3}
-	local currPos: Vector3? = goal
-
-	local lastDist = Vector3.zero
-	local oldPos: Vector3 = Vector3.zero
-	while currPos ~= nil do
-
-		local distVec = (currPos - oldPos).Unit
-		if distVec:Dot(lastDist) ~= 1 then		
-			table.insert(path, 1, currPos)
-			oldPos = currPos
-			lastDist = distVec
-		end
-
-		currPos = list[currPos];
+function Pathfinder.CompletePath(self: PathfinderClass, list: {[Vector3]: Vector3}, goal: Vector3, optColor: Color3?, optTime: number?)	
+	local path = self:StringPull(
+		PruneCollinear(ReverseMap(list, goal), 0.05)
+	)
+	
+	if Settings.DO_SMOOTH_PATHS then 
+		path = PathToCurved(path) 
 	end
 	
-	path = self:StringPull(path)
-	
-	if not Settings.DO_SMOOTH_PATHS then
-		if Settings.VISUALIZE then
-			for i = 1, #path - 1 do
-				Gizmo.AddDebrisInSeconds(0.5, function()
-					Gizmo.PushProperty("Color3", Color3.fromRGB(0, 255, 0))
-					Gizmo.Arrow:Draw(path[i], path[i+1], 1, (path[i+1] - path[i]).Magnitude, 5)
-				end)
-			end
-		end
-		
-		return path
-	end
-	
-	local newPath = PathToCurved(self:StringPull(path))
-
 	if Settings.VISUALIZE then
-		for i = 1, #newPath - 1 do
-			Gizmo.AddDebrisInSeconds(0.5, function()
-				Gizmo.PushProperty("Color3", Color3.fromRGB(0, 255, 0))
-				Gizmo.Arrow:Draw(newPath[i], newPath[i+1], 1, (newPath[i+1] - newPath[i]).Magnitude, 5)
-			end)
-		end
+		VisualizePath(path, optColor, optTime)
 	end
 
-	return newPath
+	return path
 end
 
 --
@@ -243,7 +243,7 @@ function Pathfinder.new(Agent: Instance, OptOrigin: Vector3?, MaxSize: number, V
 		`Agent of type {typeof(Agent)} is not a valid member of the Game datamodel`
 	)
 	
-	local self = {}
+	local self = {} 
 	OptOrigin = if OptOrigin then ConstrainVector(OptOrigin, MaxSize) else Vector3.zero
 	self.OctreeStorage = {} do
 		self.OctreeStorage[OptOrigin :: Vector3] = SVO.new(MaxSize, VoxelSize, OptOrigin, agentRadius)
@@ -298,26 +298,6 @@ function Pathfinder.FindSVO(self: PathfinderClass, target: Vector3): SVO.SVOClas
 	end
 	
 	return self:GrabSVO(target)
-end
-
-function Pathfinder.StringPull(self: PathfinderClass, path: {Vector3}): {Vector3}
-	if #path <= 2 then 
-		return path 
-	end
-
-	local pruned = { path[1] }
-	
-	local p = 1 
-	for i = 2, #path - 1 do
-		local svo = self:FindSVO(path[i])
-		if not svo:LineOfSight(path[p], path[i + 1]) then
-			table.insert(pruned, path[i])
-			p = i
-		end
-	end
-	
-	table.insert(pruned, path[#path])
-	return pruned
 end
 
 function Pathfinder.ResolveDisparateNeighborFace(self: PathfinderClass, ogNodeLink: SVO.Link, neighborLink: number, ogSVO: SVO.SVOClass, neighborSVO: SVO.SVOClass, dirIdx: number): { SVO.Link }
@@ -383,9 +363,13 @@ local function FindCoarseRegion(
 			if ancestorMorton == wpMorton then
 				return idx
 			end
+		else
+			-- link is coarser than the waypoint: check if the waypoint is inside the link
+			local wpAncestorMorton = SVO.GetAncestorMorton(waypoint.link, linkLayer)
+			if wpAncestorMorton == linkMorton then
+				return idx
+			end
 		end
-		-- linkLayer > wpLayer: link is coarser than (contains) this waypoint.
-		-- It belongs to no single waypoint region, so we skip it.
 	end
 
 	return 0
@@ -420,8 +404,8 @@ function Pathfinder.ComputeFinePath(
 	self: PathfinderClass, 
 	startPos: Vector3, 
 	endPos: Vector3, 
-	coarseWaypoints: { CoarseWaypoint }?,
-	maxLayer: number?): {Vector3}?	
+	coarseWaypoints: { CoarseWaypoint }?): { Vector3 }?	
+	
 	local startSVO: SVO.SVOClass = self:FindSVO(startPos)
 	local endSVO: SVO.SVOClass = self:FindSVO(endPos)
 
@@ -511,22 +495,18 @@ function Pathfinder.ComputeFinePath(
 		local offsetPos = newSVO:OffsetLeafNode(newNodePos, newSubnode)
 		local realLinkPos = if newNodeIsNode then newNodePos else offsetPos	
 		local currentWaypointIdx = waypoint[realLinkPos] or startWaypointIdx
+		if not currentWaypointIdx then
+			VisualizeNode(realLinkPos, newLayer, Color3.new(0.333333, 1, 0.498039), newSVO, 5)
+			error("CHECK")
+		end
 
 		if realLinkPos == endNodePos then
-			local path = self:StringPull(ReverseMap(explored, realLinkPos))
-			return if Settings.DO_SMOOTH_PATHS then PathToCurved(path) else path
+			return self:CompletePath(explored, realLinkPos, Color3.new(0, 1, 0), 3)
 		end
 		
 		if Settings.VISUALIZE then
-			VisualizeNode(realLinkPos, newLayer, Color3.new(0, 0.666667, 1), newSVO)
-			local currList = ReverseMap(explored, realLinkPos)
-			
-			for i = 1, #currList - 1 do
-				Gizmo.AddDebrisInSeconds(0.1, function()
-					Gizmo.PushProperty("Color3", Color3.fromHSV(0.8, 0.7, (i/#currList)/0.7 + 0.3))
-					Gizmo.Arrow:Draw(currList[i], currList[i+1], 1, (currList[i+1] - currList[i]).Magnitude, 3)
-				end)
-			end
+			VisualizeNode(realLinkPos, newLayer, Color3.new(0, 0.666667, 1), newSVO)			
+			VisualizePath(ReverseMap(explored, realLinkPos), function(i, m) return Color3.fromHSV(0.9, 1 - (i/m), 0.8) end)
 		end
 		
 		if lastPair then
@@ -583,7 +563,7 @@ function Pathfinder.ComputeFinePath(
 						waypoint[childPos] = childWaypointIdx
 						
 						if Settings.VISUALIZE then
-							VisualizeNode(childPos, newLayer, Color3.fromHSV(0.333333, 1, 1), newSVO)	
+							VisualizeNode(childPos, newLayer, Color3.fromHSV(0.333333, 1, 1), newSVO, nil, subnode)	
 						end
 						
 						pq:Push(self.Heuristic(childPos, endPos, newLayer), {
@@ -659,6 +639,11 @@ function Pathfinder.ComputeFinePath(
 							end
 							
 							local subnodePos = newSVO:OffsetLeafNode(childPos, subnode)
+							if Settings.VISUALIZE then
+								VisualizeNode(subnodePos, newLayer - 1, Color3.fromHSV(0.166667, 1, 1), newSVO, nil, subnode)
+							end
+							
+							waypoint[subnodePos] = currentWaypointIdx							
 							pq:Push(self.Heuristic(subnodePos, endPos, newLayer - 1), {
 								P1 = {P1 = SVO.CreateLink(newLayer - 1, newChild), P2 = newSVO}, 
 								P2 = {P1 = lastLink, P2 = lastSVO}})
@@ -668,6 +653,7 @@ function Pathfinder.ComputeFinePath(
 							VisualizeNode(childPos, newLayer - 1, Color3.fromHSV(0.166667, 1, 1), newSVO)
 						end
 						
+						waypoint[childPos] = currentWaypointIdx
 						pq:Push(self.Heuristic(childPos, endPos, newLayer - 1), {
 							P1 = {P1 = SVO.CreateLink(newLayer - 1, newChild), P2 = newSVO},
 							P2 = {P1 = lastLink, P2 = lastSVO}
@@ -685,10 +671,10 @@ function Pathfinder.ComputeFinePath(
 		
 		local neighbors = if newNodeIsNode then newNode.NeighborLinks else SVO.LEAF_DIRS[newSubnode + 1]
 		for idx, neighbor in neighbors do
-			local isInside = neighbor >= 0		
+			local isInsideSVO = neighbor >= 0		
 			
 			if not newNodeIsNode then 
-				if isInside and SVO.IsBitSet(newNode, neighbor) then
+				if isInsideSVO and SVO.IsBitSet(newNode, neighbor) then
 					continue
 				end
 			end
@@ -701,12 +687,12 @@ function Pathfinder.ComputeFinePath(
 			
 			local newNeighborPos = 
 				if newNodeIsNode then
-					(if isInside then newSVO:GrabWorldSpace( 
+					(if isInsideSVO then newSVO:GrabWorldSpace( 
 						SVO.GetMortonCode(neighbor), 
 						SVO.GetLayerIndex(neighbor)) 
 					else newNodePos + DIRECTIONS[idx] * (bit32.lshift(1, newLayer + 2) * self.VoxelSize))
 				else
-					(if isInside then newSVO:OffsetLeafNode(newNodePos, neighbor)
+					(if isInsideSVO then newSVO:OffsetLeafNode(newNodePos, neighbor)
 					else offsetPos + DIRECTIONS[idx] * self.VoxelSize)
 							
 			local neighborSVO = self:FindSVO(newNeighborPos)
@@ -717,7 +703,7 @@ function Pathfinder.ComputeFinePath(
 			local neighborMorton = SVO.GetMortonCode(neighborLink)
 			local neighborSubidx = SVO.GetSubnodeIndex(neighborLink)
 			
-			if not isInside then				
+			if not isInsideSVO then				
 				neighborLink = neighborSVO:IdentifyRegion(newNeighborPos)
 				if not neighborLink then
 					continue
@@ -745,7 +731,7 @@ function Pathfinder.ComputeFinePath(
 						local faceIsEmpty = SVO.IsNodeEmpty(faceNode, faceLayer)
 						
 						if Settings.VISUALIZE then
-							VisualizeNode(facePos, faceLayer, Color3.fromHSV(0.056, 0.501961, 1), newSVO)
+							VisualizeNode(facePos, faceLayer, Color3.fromHSV(0.125, 1, 1), newSVO)
 						end
 						
 						local newCost = costMap[realLinkPos] + self.StepCost(faceLayer)
@@ -769,7 +755,8 @@ function Pathfinder.ComputeFinePath(
 							--if Settings.VISUALIZE then
 							--	VisualizeNode(facePos, faceLayer, Color3.fromHSV(0.166667, 1, 1), newSVO)
 							--end
-
+							
+							waypoint[facePos] = currentWaypointIdx
 							pq:Push(self.Heuristic(facePos, endPos, faceLayer), {
 								P1 = {P1 = SVO.CreateLink(faceLayer, faceMorton), P2 = neighborSVO},
 								P2 = {P1 = SVO.CreateLink(newLayer, newMorton, newSubnode), P2 = newSVO}
@@ -826,7 +813,7 @@ function Pathfinder.ComputeFinePath(
 			
 			local neighborWaypointIdx = currentWaypointIdx
 			if coarseWaypoints then
-				local regionSVO = if isInside then newSVO else neighborSVO
+				local regionSVO = if isInsideSVO then newSVO else neighborSVO
 
 				-- For leaf subnodes (not real nodes), inherit the current region
 				-- rather than trying to look them up, since their link encodes the
@@ -851,7 +838,9 @@ function Pathfinder.ComputeFinePath(
 					-- Only allow it if we're already at or past the last waypoint
 					-- (i.e. we're converging on the goal), otherwise skip it to
 					-- keep the search corridor-constrained.
-					if currentWaypointIdx < #coarseWaypoints then
+					local isNearGoal = (newNeighborPos - endNodePos).Magnitude 
+						< bit32.lshift(1, neighborLayer + 2) * self.VoxelSize
+					if not isNearGoal and currentWaypointIdx < #coarseWaypoints then
 						continue
 					end
 				end
@@ -864,6 +853,8 @@ function Pathfinder.ComputeFinePath(
 						VisualizeNode(newNeighborPos, neighborLayer, Color3.fromHSV(0.166667, 1, 1), newSVO)	
 					end
 					
+					local existingIdx = waypoint[newNeighborPos] or 0
+					waypoint[newNeighborPos] = math.max(existingIdx, neighborWaypointIdx)
 					pq:Push(self.Heuristic(newNeighborPos, endPos, neighborLayer), {
 						P1 = {
 							P1 = SVO.CreateLink(neighborLayer, neighborMorton, neighborSubidx), 
@@ -880,7 +871,9 @@ function Pathfinder.ComputeFinePath(
 			if not costMap[newNeighborPos] or newCost < costMap[newNeighborPos] then
 				costMap[newNeighborPos] = newCost
 				explored[newNeighborPos] = realLinkPos
-				waypoint[newNeighborPos] = neighborWaypointIdx
+				
+				local existingIdx = waypoint[newNeighborPos] or 0
+				waypoint[newNeighborPos] = math.max(existingIdx, neighborWaypointIdx)
 				
 				if Settings.VISUALIZE then
 					VisualizeNode(newNeighborPos, neighborLayer, Color3.fromHSV(0.333333, 1, 1), newSVO)
@@ -912,7 +905,7 @@ function Pathfinder.ComputeCoarsePath(
 
 	local costMap =   	{} :: { [Vector3]: number}
 	local explored =   	{} :: { [Vector3]: Vector3 }  		
-	local exploredLink= {} :: { [Vector3]: number } -- link -> predecessor link
+	local exploredLink= {} :: { [Vector3]: number }         -- link -> predecessor link
 	local exploredSVO = {} :: { [Vector3]: SVO.SVOClass }  	-- link -> its SVO
 
 	-- Start and end at minLayer or above
@@ -979,12 +972,12 @@ function Pathfinder.ComputeCoarsePath(
 			end
 			
 			if Settings.VISUALIZE then
-				for i = 1, #waypoints - 1 do
-					Gizmo.AddDebrisInSeconds(3, function()
-						Gizmo.PushProperty("Color3", Color3.fromHSV(0.555556, 1, 1))
-						Gizmo.Arrow:Draw(waypoints[i].pos, waypoints[i+1].pos, 1, (waypoints[i+1].pos - waypoints[i].pos).Magnitude, 3)
-					end)
+				local path = {}
+				for _, wp in waypoints do
+					table.insert(path, wp.pos)
 				end
+				
+				VisualizePath(path, Color3.new(0, 0.5, 1), 2)
 			end
 
 			return waypoints
@@ -997,23 +990,16 @@ function Pathfinder.ComputeCoarsePath(
 		
 		if Settings.VISUALIZE then
 			VisualizeNode(pos, layer, Color3.fromHSV(0.555556, 1, 1), currentSVO)
-
 			local currList = ReverseMap(explored, pos)
-
-			for i = 1, #currList - 1 do
-				Gizmo.AddDebrisInSeconds(0.1, function()
-					Gizmo.PushProperty("Color3", Color3.fromHSV(0.8, 0.7, (i/#currList)/0.7 + 0.3))
-					Gizmo.Arrow:Draw(currList[i], currList[i+1], 1, (currList[i+1] - currList[i]).Magnitude, 3)
-				end)
-			end
+			VisualizePath(currList, function(i, m) return Color3.fromHSV(0.6, 1 - (i/m), 0.7) end)
 		end
 
 		for dirIdx, neighborLink in node.NeighborLinks do
-			local isInside = neighborLink >= 0
+			local isInsideSVO = neighborLink >= 0
 			local nLayer, nMorton, neighborPos
 			
 			local neighborSVO
-			if isInside then
+			if isInsideSVO then
 				nLayer = SVO.GetLayerIndex(neighborLink)
 				nMorton = SVO.GetMortonCode(neighborLink)
 				
@@ -1054,7 +1040,8 @@ function Pathfinder.ComputeCoarsePath(
 				continue
 			end
 			
-			if not neighborNode.Traversable[dirIdx] then
+			local entryFaceIdx = if dirIdx % 2 == 1 then dirIdx + 1 else dirIdx - 1
+			if not neighborNode.FaceOpen[entryFaceIdx] then
 				if Settings.VISUALIZE then
 					VisualizeNode(neighborPos, nLayer, Color3.fromHSV(0, 1, 1), neighborSVO)
 				end
@@ -1067,7 +1054,6 @@ function Pathfinder.ComputeCoarsePath(
 			end
 			
 			if not SVO.IsNodeEmpty(neighborNode, nLayer) and nLayer > minLayer then
-				-- Instead of entering this node directly, push its face-adjacent children
 				local incomingFaceIdx = if dirIdx % 2 == 1 then dirIdx + 1 else dirIdx - 1
 				local firstChild = SVO.FirstChildCode(nMorton)
 
@@ -1078,19 +1064,30 @@ function Pathfinder.ComputeCoarsePath(
 						continue
 					end
 
+					-- Skip children that are fully blocked from this entry face
+					if not childNode.Traversable[dirIdx] and not SVO.IsNodeEmpty(childNode, nLayer - 1) then
+						continue
+					end
+
 					local childPos = neighborSVO:GrabWorldSpace(childMorton, nLayer - 1)
 					local childLink = SVO.CreateLink(nLayer - 1, childMorton)
 					local densityMultiplier = 1 + childNode.DensityRatio * Settings.DENSITY_PENALTY
 					local childCost = costMap[pos] + self.StepCost(nLayer - 1) * densityMultiplier
 
 					if not costMap[childPos] or childCost < costMap[childPos] then
-						costMap[childPos]       = childCost
-						explored[childPos]      = pos
-						exploredLink[childPos]  = childLink
-						exploredSVO[childPos]   = neighborSVO
+						costMap[childPos]      = childCost
+						explored[childPos]     = pos
+						exploredLink[childPos] = childLink
+						exploredSVO[childPos]  = neighborSVO
+
+						-- If this child is also non-empty and above minLayer, it will be
+						-- expanded normally on its own turn — do NOT recurse here.
+						-- This preserves the invariant that every recorded waypoint is
+						-- a direct graph neighbor of its predecessor.
 						pq:Push(self.Heuristic(childPos, endPos, nLayer - 1), {P1 = childLink, P2 = neighborSVO})
 					end
 				end
+				
 				continue
 			end
 			
@@ -1148,8 +1145,7 @@ function Pathfinder.ComputeHierarchicalPath(
 
 	-- Phase 2: single fine search guided by the full coarse waypoint sequence.
 	-- The fine search uses region membership (not geometry) to constrain itself.
-	local result = self:ComputeFinePath(startPos, endPos, coarseWaypoints, 2)
-
+	local result = self:ComputeFinePath(startPos, endPos, coarseWaypoints)
 	if not result then
 		warn("ComputeHierarchicalPath: guided fine search failed, attempting unguided")
 		result = self:ComputeFinePath(startPos, endPos)
